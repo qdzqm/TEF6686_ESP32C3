@@ -41,7 +41,7 @@
  * 波段切换/步进切换/双击等明确操作不受此延时影响, 仍立即保存。 */
 #define STATE_SAVE_DELAY_MANUAL_MS  20000UL   // 手动调台: 稳定后保存的延时(ms)
 #define STATE_SAVE_DELAY_SEEK_MS    20000UL   // 搜台落台: 稳定后保存的延时(ms)
-#define STATE_SAVE_DELAY_THEME_MS   3000UL    // 屏幕配色: 选定该配色并停留满此时长后保存(ms)
+#define STATE_SAVE_DELAY_THEME_MS   10000UL    // 屏幕配色: 选定该配色并停留满此时长后保存(ms)
 
 // 显示尺寸常量
 const uint16_t DISPLAY_WIDTH = 320;   // 旋转270度后的宽度
