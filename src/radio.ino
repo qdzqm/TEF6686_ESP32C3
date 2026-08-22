@@ -41,6 +41,7 @@
  * 波段切换/步进切换/双击等明确操作不受此延时影响, 仍立即保存。 */
 #define STATE_SAVE_DELAY_MANUAL_MS  20000UL   // 手动调台: 稳定后保存的延时(ms)
 #define STATE_SAVE_DELAY_SEEK_MS    20000UL   // 搜台落台: 稳定后保存的延时(ms)
+#define STATE_SAVE_DELAY_THEME_MS   3000UL    // 屏幕配色: 选定该配色并停留满此时长后保存(ms)
 
 // 显示尺寸常量
 const uint16_t DISPLAY_WIDTH = 320;   // 旋转270度后的宽度
@@ -80,9 +81,48 @@ struct RadioState {
     int swStep = SW_Step_5k;
     int mwStep = AM_Step_9k;
     bool fmSeekStep = true;
+    uint8_t themeIdx = 0;      // 当前屏幕配色方案序号(见 SCREEN_THEMES)
 };
 
 RadioState radioState;
+
+// ==================== 屏幕配色方案 ====================
+// 每个配色包含 4 个颜色角色:
+//   bg   背景色(整屏/擦除区域/文字底色)
+//   fg   前景主色(频率数字/选中标签/信号条/小数点/STEREO)
+//   dim  次要色(未选中标签/信号条边框)
+//   hint 提示文字色(MONO 等)
+typedef struct {
+    uint16_t bg;
+    uint16_t fg;
+    uint16_t dim;
+    uint16_t hint;
+} ScreenTheme;
+
+static const ScreenTheme SCREEN_THEMES[] = {
+    /* 0 经典黑白 */ { ILI9341_LTSM::C_BLACK, ILI9341_LTSM::C_WHITE,  ILI9341_LTSM::C_DGREY,  ILI9341_LTSM::C_LGREY },
+    /* 1 琥珀复古 */ { ILI9341_LTSM::C_BLACK, ILI9341_LTSM::C_YELLOW, ILI9341_LTSM::C_BROWN,  ILI9341_LTSM::C_OLIVE },
+    /* 2 绿色荧光 */ { ILI9341_LTSM::C_BLACK, ILI9341_LTSM::C_GREEN,  ILI9341_LTSM::C_DGREEN, ILI9341_LTSM::C_OLIVE },
+    /* 3 深蓝冰蓝 */ { ILI9341_LTSM::C_NAVY,  ILI9341_LTSM::C_WHITE,  ILI9341_LTSM::C_LBLUE,  ILI9341_LTSM::C_LBLUE },
+    /* 4 白纸反色 */ { ILI9341_LTSM::C_WHITE, ILI9341_LTSM::C_BLACK,  ILI9341_LTSM::C_DGREY,  ILI9341_LTSM::C_GREY  },
+};
+#define THEME_COUNT (sizeof(SCREEN_THEMES) / sizeof(SCREEN_THEMES[0]))
+
+/* 当前生效的配色(绘制函数统一使用这 4 个变量) */
+uint16_t themeBg   = ILI9341_LTSM::C_BLACK;
+uint16_t themeFg   = ILI9341_LTSM::C_WHITE;
+uint16_t themeDim  = ILI9341_LTSM::C_DGREY;
+uint16_t themeHint = ILI9341_LTSM::C_LGREY;
+
+/* 应用指定序号的配色方案(越界则回到方案 0) */
+void applyTheme(uint8_t idx) {
+    if (idx >= THEME_COUNT) idx = 0;
+    radioState.themeIdx = idx;
+    themeBg   = SCREEN_THEMES[idx].bg;
+    themeFg   = SCREEN_THEMES[idx].fg;
+    themeDim  = SCREEN_THEMES[idx].dim;
+    themeHint = SCREEN_THEMES[idx].hint;
+}
 
 // 编码器
 class RotaryEncoder {
@@ -141,7 +181,7 @@ void updateFrequency(int start_x, int start_y, uint16_t freq, const uint8_t* fon
     if (freq == radioState.lastDisplayedFreq) return;
     
     myTFT.setFont(font);
-    myTFT.setTextColor(myTFT.C_WHITE, myTFT.C_BLACK);
+    myTFT.setTextColor(themeFg, themeBg);
     
     int pos1 = start_x;
     int pos2 = start_x + 32;  
@@ -170,7 +210,7 @@ void updateFrequency(int start_x, int start_y, uint16_t freq, const uint8_t* fon
             int tens = integerPart / 10;
             int units = integerPart % 10;
             
-            myTFT.fillRect(pos1, start_y, 32, 50, myTFT.C_BLACK);
+            myTFT.fillRect(pos1, start_y, 32, 50, themeBg);
             myTFT.setCursor(pos2, start_y);
             myTFT.print(tens);
             myTFT.setCursor(pos3, start_y);
@@ -178,8 +218,8 @@ void updateFrequency(int start_x, int start_y, uint16_t freq, const uint8_t* fon
         }
         
         int dotY = start_y + 50 - 10;
-        myTFT.fillRect(pos4, start_y, 32, 50, myTFT.C_BLACK);
-        myTFT.fillRect(dotPos, dotY, 6, 6, myTFT.C_WHITE);
+        myTFT.fillRect(pos4, start_y, 32, 50, themeBg);
+        myTFT.fillRect(dotPos, dotY, 6, 6, themeFg);
         
         myTFT.setCursor(decimalPos, start_y);
         myTFT.print(decimalDigit);
@@ -220,7 +260,7 @@ void updateFrequency(int start_x, int start_y, uint16_t freq, const uint8_t* fon
             
             myTFT.setCursor(pos4, start_y);
             myTFT.print(digit4);
-            myTFT.fillRect(pos5, start_y, 33+10, 50, myTFT.C_BLACK);
+            myTFT.fillRect(pos5, start_y, 33+10, 50, themeBg);
             
         } else if (freq >= 100) {
             int digit1 = freq / 100;
@@ -233,7 +273,7 @@ void updateFrequency(int start_x, int start_y, uint16_t freq, const uint8_t* fon
             myTFT.print(digit2);
             myTFT.setCursor(pos3, start_y);
             myTFT.print(digit3);
-            myTFT.fillRect(pos4, start_y, 32*2+10, 50, myTFT.C_BLACK);
+            myTFT.fillRect(pos4, start_y, 32*2+10, 50, themeBg);
             
         } else {
             myTFT.setCursor(pos2, start_y);
@@ -286,15 +326,15 @@ void updateSignal(int start_x, int start_y, int level) {
         
         if (i < signalBars) {
             uint16_t barColor;
-            if (signalBars <= 1) barColor = myTFT.C_WHITE;
-            else if (signalBars <= 3) barColor = myTFT.C_WHITE;
-            else barColor = myTFT.C_WHITE;
+            if (signalBars <= 1) barColor = themeFg;
+            else if (signalBars <= 3) barColor = themeFg;
+            else barColor = themeFg;
             
             myTFT.fillRect(barX, barY, BAR_WIDTH, barHeight, barColor);
-            myTFT.fillRect(barX, barY, BAR_WIDTH, 1, myTFT.C_BLACK);
+            myTFT.fillRect(barX, barY, BAR_WIDTH, 1, themeBg);
         } else {
-            myTFT.fillRect(barX, barY, BAR_WIDTH, barHeight, myTFT.C_BLACK);
-            myTFT.drawRectWH(barX, barY, BAR_WIDTH, barHeight, myTFT.C_DGREY);
+            myTFT.fillRect(barX, barY, BAR_WIDTH, barHeight, themeBg);
+            myTFT.drawRectWH(barX, barY, BAR_WIDTH, barHeight, themeDim);
         }
     }
     
@@ -304,13 +344,13 @@ void updateSignal(int start_x, int start_y, int level) {
 // ==================== 界面绘制函数 ====================
 
 void drawScreenLayout() {
-    myTFT.fillScreen(myTFT.C_BLACK);
+    myTFT.fillScreen(themeBg);
     
     myTFT.setFont(FontHallfetica);
     int startX = 0;
     for (int i = 0; i < 3; i++) {
-        uint16_t color = radioState.topSelected[i] ? myTFT.C_WHITE : myTFT.C_DGREY;
-        myTFT.setTextColor(color, myTFT.C_BLACK);
+        uint16_t color = radioState.topSelected[i] ? themeFg : themeDim;
+        myTFT.setTextColor(color, themeBg);
         myTFT.setCursor(startX, 10);
         myTFT.print(topLabels[i]);
         startX += (strlen(topLabels[i]) * 16) + 32;
@@ -318,8 +358,8 @@ void drawScreenLayout() {
     
     updateBottomLabels();
     
-    myTFT.fillRect(5, DISPLAY_HEIGHT/2 + 5, 90, 20, myTFT.C_BLACK);
-    myTFT.setTextColor(myTFT.C_LGREY, myTFT.C_BLACK);
+    myTFT.fillRect(5, DISPLAY_HEIGHT/2 + 5, 90, 20, themeBg);
+    myTFT.setTextColor(themeHint, themeBg);
     myTFT.setCursor(5, DISPLAY_HEIGHT/2 + 5);
     myTFT.print("MONO");
 }
@@ -328,8 +368,8 @@ void updateTopLabels() {
     myTFT.setFont(FontHallfetica);
     int startX = 0;
     for (int i = 0; i < 3; i++) {
-        uint16_t color = radioState.topSelected[i] ? myTFT.C_WHITE : myTFT.C_DGREY;
-        myTFT.setTextColor(color, myTFT.C_BLACK);
+        uint16_t color = radioState.topSelected[i] ? themeFg : themeDim;
+        myTFT.setTextColor(color, themeBg);
         myTFT.setCursor(startX, 10);
         myTFT.print(topLabels[i]);
         startX += (strlen(topLabels[i]) * 16) + 32;
@@ -340,11 +380,11 @@ void updateBottomLabels() {
     myTFT.setFont(FontDefault);
     int startX = 80;
     
-    myTFT.fillRect(60, DISPLAY_HEIGHT - 18, 260, 18, myTFT.C_BLACK);
+    myTFT.fillRect(60, DISPLAY_HEIGHT - 18, 260, 18, themeBg);
     
     for (int j = 0; j < 3; j++) {
-        uint16_t color = radioState.bottomSelected[radioState.nextBand][j] ? myTFT.C_WHITE : myTFT.C_DGREY;
-        myTFT.setTextColor(color, myTFT.C_BLACK);
+        uint16_t color = radioState.bottomSelected[radioState.nextBand][j] ? themeFg : themeDim;
+        myTFT.setTextColor(color, themeBg);
         myTFT.setCursor(startX, DISPLAY_HEIGHT - 13);
         myTFT.print(bottomLabels[radioState.nextBand][j]);
         startX += (strlen(bottomLabels[radioState.nextBand][j]) * 8) + 16;
@@ -375,6 +415,7 @@ static void statePackPayload(uint8_t p[STATE_PAYLOAD_LEN]) {
     for (int i = 0; i < 3; i++)
         for (int j = 0; j < 3; j++)
             p[k++] = radioState.bottomSelected[i][j] ? 1 : 0;
+    p[21] = radioState.themeIdx;   // 屏幕配色方案序号
 }
 
 /* 解包负载到 radioState(带边界防护, 非法值忽略) */
@@ -394,6 +435,7 @@ static void statePayloadUnpack(const uint8_t p[STATE_PAYLOAD_LEN]) {
             radioState.bottomSelected[i][j] = (p[k] == 1);
             k++;
         }
+    if (p[21] < THEME_COUNT) radioState.themeIdx = p[21];   // 配色序号(旧记录为 0 = 默认黑白)
     /* 把频率钳制在合法范围内, 防止 EEPROM 里是脏数据 */
     if (radioState.fmFreq < FM_MIN_FREQ) radioState.fmFreq = FM_MIN_FREQ;
     if (radioState.fmFreq > FM_MAX_FREQ) radioState.fmFreq = FM_MAX_FREQ;
@@ -522,7 +564,7 @@ void updateButtonState() {
                     case 0:
                         radio.setFrequency(radioState.fmFreq);
                         radioState.freq = radioState.fmFreq;
-                        myTFT.fillRect(60, DISPLAY_HEIGHT - 18, 200, 18, myTFT.C_BLACK);
+                        myTFT.fillRect(60, DISPLAY_HEIGHT - 18, 200, 18, themeBg);
                         if(radioState.bottomSelected[0][0] == true) radioState.seekMode = true;
                         else if(radioState.bottomSelected[0][1] == true) radioState.seekMode = true;
                         else radioState.seekMode = false;
@@ -531,7 +573,7 @@ void updateButtonState() {
                     case 1:
                         radio.SetFreqMW(radioState.amFreq);delay(10);radio.SetFreqMW(radioState.amFreq);
                         radioState.freq = radioState.amFreq;
-                        myTFT.fillRect(60, DISPLAY_HEIGHT - 18, 200, 18, myTFT.C_BLACK);
+                        myTFT.fillRect(60, DISPLAY_HEIGHT - 18, 200, 18, themeBg);
                         if(radioState.bottomSelected[1][2] == true) radioState.seekMode = true;
                         else radioState.seekMode = false;
                         radioState.displayNeedsUpdate = true;
@@ -539,7 +581,7 @@ void updateButtonState() {
                     case 2:
                         radio.SetFreqSW(radioState.swFreq);delay(10);radio.SetFreqSW(radioState.swFreq);
                         radioState.freq = radioState.swFreq;
-                        myTFT.fillRect(60, DISPLAY_HEIGHT - 18, 200, 18, myTFT.C_BLACK);
+                        myTFT.fillRect(60, DISPLAY_HEIGHT - 18, 200, 18, themeBg);
                         if(radioState.bottomSelected[2][2] == true) radioState.seekMode = true;
                         else radioState.seekMode = false;
                         radioState.displayNeedsUpdate = true;
@@ -638,39 +680,26 @@ void processButtonActions() {
             }
         }
         updateBottomLabels();
+        stateSave();   // 单击切换步进/模式 -> 立即保存
     }
     
     if (doubleClickActionPending) {
         doubleClickActionPending = false;
         
-        if (radioState.bottomSelected[0][0] || radioState.bottomSelected[0][1]) {
-            radioState.seekMode = true;
-        } else {
-            radioState.seekMode = false;
-        }
+        /* 双击: 循环切换屏幕配色 */
+        applyTheme((uint8_t)((radioState.themeIdx + 1) % THEME_COUNT));
         
-        switch(radioState.nextBand) {
-            case 0:
-                radio.setFrequency(radioState.fmFreq);
-                radioState.freq = radioState.fmFreq;
-                radioState.displayNeedsUpdate = true;
-                break;
-            case 1:
-                radio.SetFreqMW(radioState.amFreq);
-                radioState.freq = radioState.amFreq;
-                radioState.seekMode = radioState.bottomSelected[1][2];
-                radioState.displayNeedsUpdate = true;
-                break;
-            case 2:
-                radio.SetFreqSW(radioState.swFreq);
-                radioState.freq = radioState.swFreq;
-                radioState.seekMode = radioState.bottomSelected[2][2];
-                radioState.displayNeedsUpdate = true;
-                break;
-        }
+        /* 用新配色整屏重绘 */
+        drawScreenLayout();                     // 清屏 + 顶部波段 + 底部模式标签 + MONO
+        radioState.lastDisplayedFreq = 0xFFFF;  // 强制完整重绘频率数字
+        radioState.displayNeedsUpdate = true;
+        radioState.lastSignalLevel = -1;        // 强制重绘信号条
+        radioState.lastStereoStatus = false;    // 强制重绘 STEREO/MONO 文字
+        
+        /* 不立即写 EEPROM: 在选定的配色上稳定满 STATE_SAVE_DELAY_THEME_MS 才保存,
+         * 避免快速双击试色时反复写入造成磨损 */
+        markPendingSave(STATE_SAVE_DELAY_THEME_MS);
     }
-
-    stateSave();   // 单击切换步进 / 双击重设频率 -> 保存
 }
 
 // ==================== 硬件初始化 ====================
@@ -864,8 +893,9 @@ void setup() {
     
     initEncoder();
 
-    // 从 EEPROM 恢复上次保存的状态（波段/频率/步进/模式）
+    // 从 EEPROM 恢复上次保存的状态（波段/频率/步进/模式/配色）
     stateRestore();
+    applyTheme(radioState.themeIdx);   // 应用恢复的配色(必须在 drawScreenLayout 之前)
     
     applyStateToRadio();   // 把恢复的状态实际设置到收音机硬件与界面
     radio.setVolume(-220);
@@ -1019,11 +1049,11 @@ void loop() {
                 myTFT.setFont(FontDefault);
                 
                 if (stereoStatus) {
-                    myTFT.setTextColor(myTFT.C_WHITE, myTFT.C_BLACK);
+                    myTFT.setTextColor(themeFg, themeBg);
                     myTFT.setCursor(5, DISPLAY_HEIGHT/2 + 5);
                     myTFT.print("STEREO");
                 } else {
-                    myTFT.setTextColor(myTFT.C_LGREY, myTFT.C_BLACK);
+                    myTFT.setTextColor(themeHint, themeBg);
                     myTFT.setCursor(5, DISPLAY_HEIGHT/2 + 5);
                     myTFT.print("MONO   ");
                 }
@@ -1038,7 +1068,7 @@ void loop() {
             updateSignal(DISPLAY_WIDTH - 52, 5, signalLevel);
 
             myTFT.setFont(FontDefault);
-            myTFT.setTextColor(myTFT.C_LGREY, myTFT.C_BLACK);
+            myTFT.setTextColor(themeHint, themeBg);
             myTFT.setCursor(5, DISPLAY_HEIGHT/2 + 5);
             myTFT.print("MONO   ");
             radioState.lastStereoStatus = false;
