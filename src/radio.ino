@@ -6,6 +6,13 @@
 
 // 状态存储负载长度 = EEPROM 记录数据区字节数(见 StateStore.h)
 #define STATE_PAYLOAD_LEN REC_DATA_LEN
+
+/* ==================== EEPROM 延时保存配置 ====================
+ * 手动调台 / 搜台落台后, 频率需连续稳定满下面设定的时长才会写入 EEPROM
+ * (避免频繁旋钮导致反复擦写磨损)。可根据实际体验自行调整, 单位: 毫秒。
+ * 波段切换/步进切换/双击等明确操作不受此延时影响, 仍立即保存。 */
+#define STATE_SAVE_DELAY_MANUAL_MS  20000UL   // 手动调台: 稳定后保存的延时(ms)
+#define STATE_SAVE_DELAY_SEEK_MS    20000UL   // 搜台落台: 稳定后保存的延时(ms)
 #include "fonts_LTSM/FontRetro_LTSM.hpp"
 #include "fonts_LTSM/FontDefault_LTSM.hpp"
 #include "fonts_LTSM/FontSevenSeg_LTSM.hpp"
@@ -411,7 +418,8 @@ void stateSave() {
  * 搜台刚落台时也可能需要观察判断是否继续听。
  * 因此统一用"时间戳 + 稳定窗口"防抖: 变化后只记时间,
  * 待频率连续稳定满【窗口时长】才真正保存一次。
- *    - 手动调台 / 搜台落台: 连续稳定 10s 后保存
+ *    - 手动调台 / 搜台落台: 连续稳定满 STATE_SAVE_DELAY_MANUAL_MS /
+ *      STATE_SAVE_DELAY_SEEK_MS 后保存
  * 波段切换/步进切换/双击等低频明确操作仍立即调用 stateSave。 */
 
 static uint32_t st_pendingChangeMs = 0;   /* 最近一次相关频率变化时刻 */
@@ -879,7 +887,7 @@ void loop() {
         processButtonActions();
     }
 
-    maybeSaveDebounced();   // 调台频率稳定满窗口(手动10s/搜台1s)则落定保存
+    maybeSaveDebounced();   // 调台频率稳定满窗口则落定保存(窗口时长见 STATE_SAVE_DELAY_*_MS)
     
     static int32_t lastCount = 0;
     int32_t currentCount = encoder.getCount();
@@ -988,9 +996,9 @@ void loop() {
         }
         
         if (radioState.seekMode) {
-            markPendingSave(10000);  // 搜台落台 -> 稳定 10s 后保存
+            markPendingSave(STATE_SAVE_DELAY_SEEK_MS);    // 搜台落台 -> 稳定后保存
         } else {
-            markPendingSave(10000);  // 手动调台 -> 稳定 10s 后保存
+            markPendingSave(STATE_SAVE_DELAY_MANUAL_MS);  // 手动调台 -> 稳定后保存
         }
 
         lastCount = currentCount;
