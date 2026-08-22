@@ -1,7 +1,11 @@
 #include "TEF6686.h"
 #include "Wire.h"
 #include <Arduino.h>
+#include "StateStore.h"
 #include "ILI9341_LTSM.hpp"
+
+// 状态存储负载长度 = EEPROM 记录数据区字节数(见 StateStore.h)
+#define STATE_PAYLOAD_LEN REC_DATA_LEN
 #include "fonts_LTSM/FontRetro_LTSM.hpp"
 #include "fonts_LTSM/FontDefault_LTSM.hpp"
 #include "fonts_LTSM/FontSevenSeg_LTSM.hpp"
@@ -340,6 +344,142 @@ void updateBottomLabels() {
     }
 }
 
+// ==================== 状态保存 / 恢复 (EEPROM 磨损均衡) ====================
+
+static uint8_t st_lastPayload[STATE_PAYLOAD_LEN];
+static bool   st_lastValid = false;
+
+/* 把当前 radioState 打包成负载字节 */
+static void statePackPayload(uint8_t p[STATE_PAYLOAD_LEN]) {
+    memset(p, 0, STATE_PAYLOAD_LEN);
+    p[0]  = (uint8_t)(radioState.nextBand & 0xFF);
+    p[1]  = radioState.seekMode    ? 1 : 0;
+    p[2]  = radioState.fmSeekStep  ? 1 : 0;
+    p[3]  = (uint8_t)(radioState.mwStep & 0xFF);
+    p[4]  = (uint8_t)(radioState.swStep & 0xFF);
+    p[5]  = (uint8_t)((radioState.swStep >> 8) & 0xFF);
+    p[6]  = (uint8_t)(radioState.fmFreq & 0xFF);
+    p[7]  = (uint8_t)((radioState.fmFreq >> 8) & 0xFF);
+    p[8]  = (uint8_t)(radioState.amFreq & 0xFF);
+    p[9]  = (uint8_t)((radioState.amFreq >> 8) & 0xFF);
+    p[10] = (uint8_t)(radioState.swFreq & 0xFF);
+    p[11] = (uint8_t)((radioState.swFreq >> 8) & 0xFF);
+    int k = 12;
+    for (int i = 0; i < 3; i++)
+        for (int j = 0; j < 3; j++)
+            p[k++] = radioState.bottomSelected[i][j] ? 1 : 0;
+}
+
+/* 解包负载到 radioState(带边界防护, 非法值忽略) */
+static void statePayloadUnpack(const uint8_t p[STATE_PAYLOAD_LEN]) {
+    if (p[0] <= 2) radioState.nextBand = p[0];
+    radioState.seekMode   = (p[1] == 1);
+    radioState.fmSeekStep = (p[2] == 1);
+    if (p[3] == AM_Step_1k || p[3] == AM_Step_9k) radioState.mwStep = p[3];
+    uint16_t sstep = (uint16_t)(((uint16_t)p[5] << 8) | p[4]);
+    if (sstep == SW_Step_5k || sstep == SW_Step_500k) radioState.swStep = sstep;
+    radioState.fmFreq = (uint16_t)((uint16_t)p[6] | ((uint16_t)p[7] << 8));
+    radioState.amFreq = (uint16_t)((uint16_t)p[8] | ((uint16_t)p[9] << 8));
+    radioState.swFreq = (uint16_t)((uint16_t)p[10] | ((uint16_t)p[11] << 8));
+    int k = 12;
+    for (int i = 0; i < 3; i++)
+        for (int j = 0; j < 3; j++) {
+            radioState.bottomSelected[i][j] = (p[k] == 1);
+            k++;
+        }
+    /* 把频率钳制在合法范围内, 防止 EEPROM 里是脏数据 */
+    if (radioState.fmFreq < FM_MIN_FREQ) radioState.fmFreq = FM_MIN_FREQ;
+    if (radioState.fmFreq > FM_MAX_FREQ) radioState.fmFreq = FM_MAX_FREQ;
+    if (radioState.amFreq < AM_MIN_FREQ) radioState.amFreq = AM_MIN_FREQ;
+    if (radioState.amFreq > AM_MAX_FREQ) radioState.amFreq = AM_MAX_FREQ;
+    if (radioState.swFreq < SW_MIN_FREQ) radioState.swFreq = SW_MIN_FREQ;
+    if (radioState.swFreq > SW_MAX_FREQ) radioState.swFreq = SW_MAX_FREQ;
+}
+
+/* 保存当前状态(若状态未变化则跳过写操作, 避免无谓磨损) */
+void stateSave() {
+    uint8_t p[STATE_PAYLOAD_LEN];
+    statePackPayload(p);
+    if (st_lastValid && memcmp(p, st_lastPayload, STATE_PAYLOAD_LEN) == 0) return;
+    memcpy(st_lastPayload, p, STATE_PAYLOAD_LEN);
+    st_lastValid = true;
+    st_save(p);
+}
+
+/* ==================== 调台落定后延时保存 ====================
+ * 手动旋钮调台频率变化频繁, 若每档写 EEPROM 会反复磨损且卡手感;
+ * 搜台刚落台时也可能需要观察判断是否继续听。
+ * 因此统一用"时间戳 + 稳定窗口"防抖: 变化后只记时间,
+ * 待频率连续稳定满【窗口时长】才真正保存一次。
+ *    - 手动调台 / 搜台落台: 连续稳定 10s 后保存
+ * 波段切换/步进切换/双击等低频明确操作仍立即调用 stateSave。 */
+
+static uint32_t st_pendingChangeMs = 0;   /* 最近一次相关频率变化时刻 */
+static uint32_t st_pendingWindowMs = 0;   /* 需稳定的窗口时长(ms)      */
+static bool     st_needSave        = false;
+
+/* 频率发生变化后调用: 记录变化时刻与窗口, 不立即写 EEPROM */
+static void markPendingSave(uint32_t windowMs) {
+    st_pendingChangeMs = millis();
+    st_pendingWindowMs = windowMs;
+    st_needSave = true;
+}
+
+/* loop() 中周期性调用: 稳定满窗口则保存一次 */
+static void maybeSaveDebounced() {
+    if (!st_needSave) return;
+    if ((uint32_t)(millis() - st_pendingChangeMs) >= st_pendingWindowMs) {
+        st_needSave = false;   /* 先清标志, 省得重复保存 */
+        stateSave();           /* 稳定后落定保存(内部会做内容比对去重) */
+    }
+}
+
+/* 启动时恢复上次状态 */
+void stateRestore() {
+    st_open();   /* 定位磨损均衡游标(只调用一次) */
+    uint8_t p[STATE_PAYLOAD_LEN];
+    if (st_load(p)) {
+        statePayloadUnpack(p);
+        memcpy(st_lastPayload, p, STATE_PAYLOAD_LEN);
+        st_lastValid = true;
+    }
+    /* 恢复后的界面定位 */
+    radioState.currentBand = radioState.nextBand;
+    for (int i = 0; i < 3; i++)
+        radioState.topSelected[i] = (i == radioState.nextBand);
+    if (radioState.nextBand == 0)      radioState.freq = radioState.fmFreq;
+    else if (radioState.nextBand == 1) radioState.freq = radioState.amFreq;
+    else                               radioState.freq = radioState.swFreq;
+}
+
+/* 把已恢复的状态实际应用到收音机硬件与界面高亮 */
+void applyStateToRadio() {
+    for (int i = 0; i < 3; i++)
+        radioState.topSelected[i] = (i == radioState.nextBand);
+
+    switch (radioState.nextBand) {
+        case 0:
+            radio.setFrequency(radioState.fmFreq);
+            radioState.freq = radioState.fmFreq;
+            /* FM 底栏: 若选中前两格(SEEK_100K / SEEK_50K)则进入 seek */
+            if (radioState.bottomSelected[0][0] || radioState.bottomSelected[0][1])
+                radioState.seekMode = true;
+            else
+                radioState.seekMode = false;
+            break;
+        case 1:
+            radio.SetFreqMW(radioState.amFreq);
+            radioState.freq = radioState.amFreq;
+            radioState.seekMode = radioState.bottomSelected[1][2];
+            break;
+        case 2:
+            radio.SetFreqSW(radioState.swFreq);
+            radioState.freq = radioState.swFreq;
+            radioState.seekMode = radioState.bottomSelected[2][2];
+            break;
+    }
+}
+
 // ==================== 按键处理函数 ====================
 
 void updateButtonState() {
@@ -400,6 +540,7 @@ void updateButtonState() {
                 
                 updateTopLabels();
                 updateBottomLabels();
+                stateSave();          // 波段切换 -> 保存
                 buttonState = BUTTON_IDLE;
                 return;
             }
@@ -520,6 +661,8 @@ void processButtonActions() {
                 break;
         }
     }
+
+    stateSave();   // 单击切换步进 / 双击重设频率 -> 保存
 }
 
 // ==================== 硬件初始化 ====================
@@ -540,7 +683,7 @@ bool initRadio() {
         return false;
     }
     
-    delay(500);
+    delay(100);      // 收音机初始化完成后的短暂稳定(原 500ms 过长, 已缩短)
     radio.powerOn();
     delay(100);
     return true;
@@ -701,7 +844,8 @@ uint16_t SWSeek(uint8_t up) {
 // ==================== 主程序 ====================
 
 void setup() {
-    delay(50);
+    // 原 delay(2000) 开机空等, 无任何依赖, 已移除以加快开机。
+
     Serial.begin(115200);
     
     pinMode(0, OUTPUT);
@@ -711,8 +855,11 @@ void setup() {
     if (!initDisplay()) while(1);
     
     initEncoder();
+
+    // 从 EEPROM 恢复上次保存的状态（波段/频率/步进/模式）
+    stateRestore();
     
-    radio.setFrequency(radioState.freq);
+    applyStateToRadio();   // 把恢复的状态实际设置到收音机硬件与界面
     radio.setVolume(-220);
     
     drawScreenLayout();
@@ -731,6 +878,8 @@ void loop() {
     if (clickActionPending || doubleClickActionPending) {
         processButtonActions();
     }
+
+    maybeSaveDebounced();   // 调台频率稳定满窗口(手动10s/搜台1s)则落定保存
     
     static int32_t lastCount = 0;
     int32_t currentCount = encoder.getCount();
@@ -838,6 +987,12 @@ void loop() {
             }
         }
         
+        if (radioState.seekMode) {
+            markPendingSave(10000);  // 搜台落台 -> 稳定 10s 后保存
+        } else {
+            markPendingSave(10000);  // 手动调台 -> 稳定 10s 后保存
+        }
+
         lastCount = currentCount;
     }
     
