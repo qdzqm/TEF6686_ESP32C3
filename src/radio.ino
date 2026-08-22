@@ -7,12 +7,6 @@
 // 状态存储负载长度 = EEPROM 记录数据区字节数(见 StateStore.h)
 #define STATE_PAYLOAD_LEN REC_DATA_LEN
 
-/* ==================== EEPROM 延时保存配置 ====================
- * 手动调台 / 搜台落台后, 频率需连续稳定满下面设定的时长才会写入 EEPROM
- * (避免频繁旋钮导致反复擦写磨损)。可根据实际体验自行调整, 单位: 毫秒。
- * 波段切换/步进切换/双击等明确操作不受此延时影响, 仍立即保存。 */
-#define STATE_SAVE_DELAY_MANUAL_MS  20000UL   // 手动调台: 稳定后保存的延时(ms)
-#define STATE_SAVE_DELAY_SEEK_MS    20000UL   // 搜台落台: 稳定后保存的延时(ms)
 #include "fonts_LTSM/FontRetro_LTSM.hpp"
 #include "fonts_LTSM/FontDefault_LTSM.hpp"
 #include "fonts_LTSM/FontSevenSeg_LTSM.hpp"
@@ -41,6 +35,12 @@
 #define SW_MIN_FREQ 2300   // 2300 KHz
 #define SW_MAX_FREQ 27000  // 27 MHz
 
+/* ==================== EEPROM 延时保存配置 ====================
+ * 手动调台 / 搜台落台后, 频率需连续稳定满下面设定的时长才会写入 EEPROM
+ * (避免频繁旋钮导致反复擦写磨损)。可根据实际体验自行调整, 单位: 毫秒。
+ * 波段切换/步进切换/双击等明确操作不受此延时影响, 仍立即保存。 */
+#define STATE_SAVE_DELAY_MANUAL_MS  20000UL   // 手动调台: 稳定后保存的延时(ms)
+#define STATE_SAVE_DELAY_SEEK_MS    20000UL   // 搜台落台: 稳定后保存的延时(ms)
 
 // 显示尺寸常量
 const uint16_t DISPLAY_WIDTH = 320;   // 旋转270度后的宽度
