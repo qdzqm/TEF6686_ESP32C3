@@ -11,10 +11,10 @@
 #include "fonts_LTSM/FontDefault_LTSM.hpp"
 #include "fonts_LTSM/FontSevenSeg_LTSM.hpp"
 #include "fonts_LTSM/FontPico_LTSM.hpp"
-#include "fonts_LTSM/FontSixteenSeg_LTSM.hpp"
 #include "fonts_LTSM/FontArialBold_LTSM.hpp"
 #include "fonts_LTSM/FontGroTesk_LTSM.hpp"
 #include "fonts_LTSM/FontMega_LTSM.hpp"
+#include "fonts_LTSM/FontGroTeskBig_LTSM.hpp"
 #include "fonts_LTSM/FontArialRound_LTSM.hpp"
 #include "fonts_LTSM/FontHallfetica_LTSM.hpp"
 
@@ -48,7 +48,7 @@ const uint16_t DISPLAY_WIDTH = 320;   // 旋转270度后的宽度
 const uint16_t DISPLAY_HEIGHT = 240;  // 旋转270度后的高度
 
 // ==================== 屏幕布局区域 (320x240, 四个圆角色块区域) ====================
-// 字体尺寸: 频率数字 FontSixteenSeg 32x48 / 顶部标签 FontHallfetica 16x16 / 底栏与状态文字 FontDefault 8x8
+// 字体尺寸: 频率数字 FontGroTeskBig 32x64 / 顶部标签 FontHallfetica 16x16 / 底栏与状态文字 FontDefault 8x8
 // 纵向: 顶部波段栏36 + 间隙4 + 频率面板128 + 间隙4 + 状态栏28 + 间隙4 + 底部模式栏36 = 240
 const uint16_t TOPBAR_X = 2, TOPBAR_Y = 2, TOPBAR_W = 316, TOPBAR_H = 34;                // 顶部波段栏(FM/MW/SW)
 const uint16_t FREQPANEL_X = 4, FREQPANEL_Y = 40, FREQPANEL_W = 312, FREQPANEL_H = 128;  // 频率显示面板
@@ -56,10 +56,13 @@ const uint16_t STATUSBAR_X = 2, STATUSBAR_Y = 172, STATUSBAR_W = 316, STATUSBAR_
 const uint16_t BOTBAR_X = 2, BOTBAR_Y = 204, BOTBAR_W = 316, BOTBAR_H = 34;              // 底部模式栏(SEEK/TUNE/步进)
 const uint16_t PANEL_RADIUS_BAR = 10;                                                    // 三个横栏色块圆角半径
 const uint16_t PANEL_RADIUS_FREQ = 12;                                                   // 频率面板色块圆角半径
-const uint16_t FREQ_START_X = 88;                                                        // 频率数字原点x(按5字符宽144居中于面板)
-const uint16_t FREQ_START_Y = FREQPANEL_Y + (FREQPANEL_H - 48) / 2;                      // =80, 数字高48在面板内垂直居中
+#define FREQ_SLOT_W   32            // 频率大字体单字符宽(FontGroTeskBig)
+#define FREQ_SLOT_H   64            // 频率大字体单字符高
+#define FREQ_SLOTS    5             // 频率共5个等宽字符格
+const uint16_t FREQ_START_X = 88;                                                        // 频率数字原点x(5字符x32=160宽, 居中于312宽面板)
+const uint16_t FREQ_START_Y = FREQPANEL_Y + (FREQPANEL_H - 64) / 2;                      // =72, 数字高64在面板内垂直居中
 const uint16_t FREQ_UNIT_X = FREQPANEL_X + FREQPANEL_W - 8 - 3 * 8;                      // =284, 单位文字3字符宽24, 右缘留8
-const uint16_t FREQ_UNIT_Y = FREQ_START_Y + 48 - 8;                                      // =120, 单位文字与数字底部对齐
+const uint16_t FREQ_UNIT_Y = FREQ_START_Y + 64 - 8;                                      // =128, 单位文字与数字底部对齐
 const uint16_t STATUS_TEXT_X = 8;                                                        // MONO/STEREO 原点x
 const uint16_t STATUS_TEXT_Y = STATUSBAR_Y + (STATUSBAR_H - 8) / 2;                      // =182, 8px文字在状态栏内垂直居中
 const uint16_t SIGNAL_X = DISPLAY_WIDTH - 8 - 38;                                        // =274, 信号条5格宽38, 右缘留8
@@ -206,122 +209,83 @@ const unsigned long LONG_PRESS_TIME = 800;
 
 // ==================== 显示函数 ====================
 
-// 频率显示函数
+/* ===== 频率大字体(32x64)快速渲染 =====
+ * 库默认 print/writeChar 在该字号下要么在栈上开 4096B 整字缓冲,
+ * 要么用逐像素模式(每字符 2048 次独立 SPI 事务, 调谐时极慢)。
+ * 方案: 直接把字体里的【单色位图】交给库的双色方法 drawBitmap(col,bgcol,data)。
+ * 它内部按行缓冲推送(每格 64 次 SPI 窗口事务), 并由库自己拆分 RGB565
+ * 高低字节(字节序必然正确), bgcolor 写满整个 32x64 格(换字无残影), 因此:
+ *   1) 颜色在绘制此刻以参数传入当前 themeFg/themePanel, 完全兼容 5 种配色;
+ *   2) 每次只重画"内容发生变化"的字符格, 未变的数字不碰屏幕 -> 不闪烁;
+ *   3) 无需任何像素/颜色缓冲(零额外内存), 速度与库原生整字缓冲相当。
+ * 字体数据本身即水平寻址、MSB-first, 正是 drawBitmap 要求的格式。 */
+static char freqSlotsOnScreen[FREQ_SLOTS + 1] = {0};     // 当前屏幕各格内容(0=空格)
+
+/* 取某 ASCII 在字体中的字形基址(越界返回空格字形) */
+static inline const uint8_t* freqGlyphPtr(char ch, const uint8_t* font) {
+    uint8_t fw  = font[0];
+    uint8_t off = font[2];
+    uint8_t num = font[3];
+    uint16_t stride = (uint16_t)(fw / 8) * font[1];
+    uint8_t c = (uint8_t)ch;
+    if (c < off || c >= (uint16_t)off + num + 1) c = ' ';
+    return font + 4 + (uint16_t)(c - off) * stride;
+}
+
+/* 把一个字符以当前前景/面板色画到屏幕某一格(背景整体填充, 与面板同色) */
+static void drawFreqSlot(int x, int y, char ch, const uint8_t* font) {
+    const uint8_t* g = freqGlyphPtr(ch, font);
+    myTFT.drawBitmap(x, y, FREQ_SLOT_W, FREQ_SLOT_H, themeFg, themePanel, g);
+}
+
+/* 组装当前频率在 5 个等宽格里应显示的字符(空格表示该格留空) */
+static void buildFreqSlots(char s[FREQ_SLOTS], uint16_t freq) {
+    for (int i = 0; i < FREQ_SLOTS; i++) s[i] = ' ';
+
+    if (radioState.nextBand == 0) {                 // FM: 10x.x MHz
+        int ip = freq / 100;
+        int dd = (freq / 10) % 10;
+        if (ip >= 100) { s[0] = '0' + ip / 100; s[1] = '0' + (ip % 100) / 10; s[2] = '0' + ip % 10; }
+        else          { s[1] = '0' + ip / 10; s[2] = '0' + ip % 10; }
+        s[3] = '.';
+        s[4] = '0' + dd;
+    } else if (radioState.nextBand == 1 || radioState.nextBand == 2) {  // MW/SW: 整数 kHz
+        if (freq >= 10000) {
+            s[0]='0'+freq/10000; s[1]='0'+(freq%10000)/1000; s[2]='0'+(freq%1000)/100;
+            s[3]='0'+(freq%100)/10; s[4]='0'+freq%10;
+        } else if (freq >= 1000) {
+            s[0]='0'+freq/1000; s[1]='0'+(freq%1000)/100; s[2]='0'+(freq%100)/10; s[3]='0'+freq%10;
+        } else if (freq >= 100) {
+            s[0]='0'+freq/100; s[1]='0'+(freq%100)/10; s[2]='0'+freq%10;
+        } else if (freq >= 10) {
+            s[1]='0'+freq/10; s[2]='0'+freq%10;
+        } else {
+            s[1]='0'+freq;
+        }
+    } else {                                        // 未知波段
+        s[0]='-'; s[1]='-'; s[2]='-';
+    }
+}
+
+// 频率显示函数: 仅重画发生变化的字符格, 未变的不刷新(无闪烁, 跟手)
 void updateFrequency(int start_x, int start_y, uint16_t freq, const uint8_t* font) {
     if (freq == radioState.lastDisplayedFreq) return;
-    
-    myTFT.setFont(font);
-    myTFT.setTextColor(themeFg, themePanel);
-    
-    int pos1 = start_x;
-    int pos2 = start_x + 32;  
-    int pos3 = start_x + 32*2;
-    int pos4 = start_x + 32*3;
-    int pos5 = start_x + 32*4;
-    int dotPos = start_x + 32*3+16;
-    int decimalPos = start_x + 32*3+32;
-    
-    if (radioState.nextBand == 0) {
-        int integerPart = freq / 100;
-        int decimalDigit = (freq / 10) % 10;
-        
-        if (integerPart >= 100) {
-            int hundreds = integerPart / 100;
-            int tens = (integerPart % 100) / 10;
-            int units = integerPart % 10;
-            
-            myTFT.setCursor(pos1, start_y);
-            myTFT.print(hundreds);
-            myTFT.setCursor(pos2, start_y);
-            myTFT.print(tens);
-            myTFT.setCursor(pos3, start_y);
-            myTFT.print(units);
-        } else {
-            int tens = integerPart / 10;
-            int units = integerPart % 10;
-            
-            myTFT.fillRect(pos1, start_y, 32, 50, themePanel);
-            myTFT.setCursor(pos2, start_y);
-            myTFT.print(tens);
-            myTFT.setCursor(pos3, start_y);
-            myTFT.print(units);
-        }
-        
-        int dotY = start_y + 50 - 10;
-        myTFT.fillRect(pos4, start_y, 32, 50, themePanel);
-        myTFT.fillRect(dotPos, dotY, 6, 6, themeFg);
-        
-        myTFT.setCursor(decimalPos, start_y);
-        myTFT.print(decimalDigit);
-        
-    } else if (radioState.nextBand == 1 || radioState.nextBand == 2) {
-        if (freq >= 10000) {
-            int digit1 = freq / 10000;
-            int digit2 = (freq % 10000) / 1000;
-            int digit3 = (freq % 1000) / 100;
-            int digit4 = (freq % 100) / 10;
-            int digit5 = freq % 10;
-            
-            myTFT.setCursor(pos1, start_y);
-            myTFT.print(digit1);
-            myTFT.setCursor(pos2, start_y);
-            myTFT.print(digit2);
-            myTFT.setCursor(pos3, start_y);
-            myTFT.print(digit3);
-            
-            myTFT.setCursor(pos4, start_y);
-            myTFT.print(digit4);
-            
-            myTFT.setCursor(pos5, start_y);
-            myTFT.print(digit5);
-            
-        } else if (freq >= 1000) {
-            int digit1 = freq / 1000;
-            int digit2 = (freq % 1000) / 100;
-            int digit3 = (freq % 100) / 10;
-            int digit4 = freq % 10;
-            
-            myTFT.setCursor(pos1, start_y);
-            myTFT.print(digit1);
-            myTFT.setCursor(pos2, start_y);
-            myTFT.print(digit2);
-            myTFT.setCursor(pos3, start_y);
-            myTFT.print(digit3);
-            
-            myTFT.setCursor(pos4, start_y);
-            myTFT.print(digit4);
-            myTFT.fillRect(pos5, start_y, 33+10, 50, themePanel);
-            
-        } else if (freq >= 100) {
-            int digit1 = freq / 100;
-            int digit2 = (freq % 100) / 10;
-            int digit3 = freq % 10;
-            
-            myTFT.setCursor(pos1, start_y);
-            myTFT.print(digit1);
-            myTFT.setCursor(pos2, start_y);
-            myTFT.print(digit2);
-            myTFT.setCursor(pos3, start_y);
-            myTFT.print(digit3);
-            myTFT.fillRect(pos4, start_y, 32*2+10, 50, themePanel);
-            
-        } else {
-            myTFT.setCursor(pos2, start_y);
-            if (freq >= 10) {
-                int tens = freq / 10;
-                int units = freq % 10;
-                myTFT.print(tens);
-                myTFT.setCursor(pos3, start_y);
-                myTFT.print(units);
-            } else {
-                myTFT.print(freq);
-            }
-        }
-    } else {
-        myTFT.setCursor(pos1, start_y);
-        myTFT.print("---");
+
+    // 若屏幕已被整体清空重画(切配色/开机), lastDisplayedFreq 会被置为 0xFFFF,
+    // 此时格内容缓存失效, 必须全部重画
+    bool forceAll = (radioState.lastDisplayedFreq == 0xFFFF);
+    if (forceAll)
+        for (int i = 0; i < FREQ_SLOTS; i++) freqSlotsOnScreen[i] = 0;
+
+    char want[FREQ_SLOTS];
+    buildFreqSlots(want, freq);
+
+    for (int i = 0; i < FREQ_SLOTS; i++) {
+        if (!forceAll && want[i] == freqSlotsOnScreen[i]) continue;  // 该格未变, 完全不碰
+        drawFreqSlot(start_x + i * FREQ_SLOT_W, start_y, want[i], font);
+        freqSlotsOnScreen[i] = want[i];
     }
-    
+
     radioState.lastDisplayedFreq = freq;
 }
 
@@ -821,7 +785,7 @@ uint16_t FMSeek(uint8_t up) {
             case 20:
                 Radio_ChangeFreqOneStep(up, seekStep);
                 Radio_SetFreq(Radio_SEARCHMODE, Radio_GetCurrentBand(), Radio_GetCurrentFreq());
-                updateFrequency(FREQ_START_X, FREQ_START_Y, Radio_GetCurrentFreq(), FontSixteenSeg);
+                updateFrequency(FREQ_START_X, FREQ_START_Y, Radio_GetCurrentFreq(), FontGroTeskBig);
             
                 mode = 30;
                 Radio_CheckStationInit();
@@ -865,7 +829,7 @@ uint16_t MWSeek(uint8_t up) {
             case 20:
                 Radio_ChangeFreqOneStep(up, 1);
                 Radio_SetFreq(Radio_SEARCHMODE, Radio_GetCurrentBand(), Radio_GetCurrentFreq());
-                updateFrequency(FREQ_START_X, FREQ_START_Y, Radio_GetCurrentFreq(), FontSixteenSeg);
+                updateFrequency(FREQ_START_X, FREQ_START_Y, Radio_GetCurrentFreq(), FontGroTeskBig);
             
                 mode = 30;
                 Radio_CheckStationInit();
@@ -906,7 +870,7 @@ uint16_t SWSeek(uint8_t up) {
             case 20:
                 Radio_ChangeFreqOneStep(up, 5);
                 Radio_SetFreq(Radio_SEARCHMODE, Radio_GetCurrentBand(), Radio_GetCurrentFreq());
-                updateFrequency(FREQ_START_X, FREQ_START_Y, Radio_GetCurrentFreq(), FontSixteenSeg);
+                updateFrequency(FREQ_START_X, FREQ_START_Y, Radio_GetCurrentFreq(), FontGroTeskBig);
             
                 mode = 30;
                 Radio_CheckStationInit();
@@ -1095,7 +1059,7 @@ void loop() {
     }
     
     if (radioState.displayNeedsUpdate) {
-        updateFrequency(FREQ_START_X, FREQ_START_Y, radioState.freq, FontSixteenSeg);
+        updateFrequency(FREQ_START_X, FREQ_START_Y, radioState.freq, FontGroTeskBig);
         radioState.displayNeedsUpdate = false;
     }
     
