@@ -1,4 +1,6 @@
-![TEF6686_ESP32C3 收音机界面（FM / 琥珀复古配色）](docs/radio_ui_FM_amber.png)
+![TEF6686_ESP32C3 四种屏幕配色](docs/radio_ui_themes_2x2.png)
+
+*上图按 FM 103.7 MHz 状态按代码 1:1 渲染，依次为：经典黑白、绿色荧光、深蓝冰蓝、白纸反色；第五种「琥珀复古」见 [docs/radio_ui_FM_amber.png](docs/radio_ui_FM_amber.png)。*
 
 # TEF6686_ESP32C3 数字收音机
 
