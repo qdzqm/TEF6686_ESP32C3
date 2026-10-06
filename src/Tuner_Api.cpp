@@ -4,7 +4,7 @@
 StationMemType StationRecord[MaxStationNum]; 
 
 /* area config*/
-#define AreaSelect Radio_EUR
+#define AreaSelect Radio_CHN
 
 #if (AreaSelect==Radio_CHN)   /*China */          
 const Radio_AreaConfigDef Radio_AreaConfig={
@@ -75,12 +75,13 @@ Description:
 ------------------------------------------------------------------------*/
 void Radio_SetFreq(uint8_t mode,uint8_t Band,uint16_t Freq)
 {
-       /*frequency baundary check*/
-	if((Freq>FreqBaundConfig[Radio_CurrentBand].MaxFreq)||(Freq<FreqBaundConfig[Radio_CurrentBand].MinFreq)){
-		Freq = FreqBaundConfig[Radio_CurrentBand].MinFreq;
-	}
 	if(Band>=MaxBandNum){
 		return;
+	}
+
+	/*frequency baundary check（按目标波段，此时 Radio_CurrentBand 还是旧波段）*/
+	if((Freq>FreqBaundConfig[Band].MaxFreq)||(Freq<FreqBaundConfig[Band].MinFreq)){
+		Freq = FreqBaundConfig[Band].MinFreq;
 	}
 
 //AF_UPDATE not change current info
