@@ -1,7 +1,5 @@
 ![TEF6686_ESP32C3 实物与三种屏幕配色](docs/radio_ui_themes_2x2.png)
 
-*左上为拼多多收音机实物（[docs/radio_PDD.jpg](docs/radio_PDD.jpg)），其余三块为 FM 103.7 MHz 状态按代码 1:1 渲染的配色：绿色荧光、深蓝冰蓝、白纸反色；另外两种「经典黑白」「琥珀复古」分别见 [docs/radio_ui_classic.png](docs/radio_ui_classic.png) 与 [docs/radio_ui_FM_amber.png](docs/radio_ui_FM_amber.png)。*
-
 # TEF6686_ESP32C3 数字收音机
 
 拼多多收音机，大家自己搜索，原程序操作不太方便，用AI编写了一个操作方便的版本。
