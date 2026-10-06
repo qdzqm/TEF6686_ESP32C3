@@ -28,7 +28,7 @@ extern eDev_Type RadioDev;
 #endif
 
 #ifndef LOW
-#define LOW  0;
+#define LOW  0
 #endif
 
 typedef enum{

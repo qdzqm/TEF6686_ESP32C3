@@ -201,11 +201,17 @@ unsigned long buttonReleaseTime = 0;
 bool clickActionPending = false;
 bool doubleClickActionPending = false;
 
+// 搜台中止请求：中断里置位，loop 里处理（中断中不能操作 I2C）
+volatile bool seekStopRequested = false;
+volatile bool seekStopByButton = false;
+bool buttonIgnoreUntilRelease = false;
+
 // 按钮常量
 const unsigned long DEBOUNCE_TIME = 20;
 const unsigned long CLICK_MAX_TIME = 300;
 const unsigned long DOUBLE_CLICK_GAP = 400;
 const unsigned long LONG_PRESS_TIME = 800;
+const unsigned long SEEK_ENCODER_GRACE = 100; // 启动搜台后旋钮静止多久才接受旋转中止
 
 // ==================== 显示函数 ====================
 
@@ -555,10 +561,33 @@ void applyStateToRadio() {
 
 // ==================== 按键处理函数 ====================
 
+// 按当前波段选中的底部选项，确定 seekMode（FM 前两项为搜索，MW/SW 第三项为搜索）
+void syncSeekModeForBand(int band) {
+    switch (band) {
+        case 0:
+            radioState.seekMode = radioState.bottomSelected[0][0] ||
+                                  radioState.bottomSelected[0][1];
+            break;
+        case 1:
+            radioState.seekMode = radioState.bottomSelected[1][2];
+            break;
+        default:
+            radioState.seekMode = radioState.bottomSelected[2][2];
+            break;
+    }
+}
+
 void updateButtonState() {
     static bool lastButtonState = HIGH;
     bool currentButtonState = digitalRead(BUTTON_PIN);
     unsigned long currentTime = millis();
+
+    // 按键中止搜台后，本次按压完全忽略直到松手（不产生单击/双击/长按）
+    if (buttonIgnoreUntilRelease) {
+        lastButtonState = currentButtonState;
+        if (currentButtonState == HIGH) buttonIgnoreUntilRelease = false;
+        return;
+    }
     
     switch (buttonState) {
         case BUTTON_IDLE:
@@ -587,29 +616,21 @@ void updateButtonState() {
                     case 0:
                         radio.setFrequency(radioState.fmFreq);
                         radioState.freq = radioState.fmFreq;
-                        myTFT.fillRect(60, BOTBAR_Y + 6, 200, BOTBAR_H - 12, themePanel2);
-                        if(radioState.bottomSelected[0][0] == true) radioState.seekMode = true;
-                        else if(radioState.bottomSelected[0][1] == true) radioState.seekMode = true;
-                        else radioState.seekMode = false;
-                        radioState.displayNeedsUpdate = true;
                         break;
                     case 1:
-                        radio.SetFreqMW(radioState.amFreq);delay(10);radio.SetFreqMW(radioState.amFreq);
+                        radio.SetFreqMW(radioState.amFreq);
                         radioState.freq = radioState.amFreq;
-                        myTFT.fillRect(60, BOTBAR_Y + 6, 200, BOTBAR_H - 12, themePanel2);
-                        if(radioState.bottomSelected[1][2] == true) radioState.seekMode = true;
-                        else radioState.seekMode = false;
-                        radioState.displayNeedsUpdate = true;
                         break;
                     case 2:
-                        radio.SetFreqSW(radioState.swFreq);delay(10);radio.SetFreqSW(radioState.swFreq);
+                        radio.SetFreqSW(radioState.swFreq);
                         radioState.freq = radioState.swFreq;
-                        myTFT.fillRect(60, BOTBAR_Y + 6, 200, BOTBAR_H - 12, themePanel2);
-                        if(radioState.bottomSelected[2][2] == true) radioState.seekMode = true;
-                        else radioState.seekMode = false;
-                        radioState.displayNeedsUpdate = true;
                         break;
                 }
+
+                syncSeekModeForBand(radioState.nextBand);
+                // FM 与 SW 的数值可能相同（如都为 9000），强制整组重绘避免缓存命中
+                radioState.lastDisplayedFreq = 0xFFFF;
+                radioState.displayNeedsUpdate = true;
                 
                 updateTopLabels();
                 updateBottomLabels();
@@ -726,6 +747,21 @@ void processButtonActions() {
     }
 }
 
+// 搜台任务状态（ISR 要访问，定义在中断函数之前）
+struct SeekJob {
+    volatile bool active = false;
+    volatile bool armed = false;      // 启动旋转结束后才武装，防止残余边沿误中止
+    uint8_t phase = 0;          // 20:频率步进 30:等待+检测 40:结果判定 50:锁定频率
+    uint8_t band = 0;
+    bool up = true;
+    uint16_t startFreq = 0;
+    uint16_t step = 0;
+    unsigned long phaseTime = 0;
+    volatile unsigned long lastEncoderActivity = 0;
+};
+
+SeekJob seekJob;
+
 // ==================== 硬件初始化 ====================
 
 void IRAM_ATTR encoderISR() {
@@ -737,6 +773,18 @@ void IRAM_ATTR encoderISR() {
     encoder.update(ENCODER_PIN_A, ENCODER_PIN_B);
     
     lastInterruptTime = interruptTime;
+
+    // 仅在搜台中、且启动旋转已静止（armed）后，新的转动才请求中止
+    if (seekJob.active) {
+        seekJob.lastEncoderActivity = interruptTime;
+        if (seekJob.armed) seekStopRequested = true;
+    }
+}
+
+// 按键按下沿（FALLING）：立即请求中止搜台，无需等待松手和单击判定
+void IRAM_ATTR buttonISR() {
+    seekStopRequested = true;
+    seekStopByButton = true;
 }
 
 bool initRadio() {
@@ -771,137 +819,147 @@ void initEncoder() {
     
     attachInterrupt(digitalPinToInterrupt(ENCODER_PIN_A), encoderISR, CHANGE);
     attachInterrupt(digitalPinToInterrupt(ENCODER_PIN_B), encoderISR, CHANGE);
+    attachInterrupt(digitalPinToInterrupt(BUTTON_PIN), buttonISR, FALLING);
 }
 
-// ==================== 搜索函数 ====================
+// ==================== 搜台（非阻塞状态机） ====================
+// 每次 loop 只推进一步，搜台过程中界面与按键全程保持响应。
+static uint16_t seekGetStep(uint8_t band) {
+    switch (band) {
+        case 0:
+            return radioState.fmSeekStep ? FM_Step_100k : (FM_Step_100k / 2);
+        case 1:
+            return AM_Step_9k;
+        default:
+            return 5;
+    }
+}
 
-uint16_t FMSeek(uint8_t up) {
-    uint16_t mode = 20;
-    uint16_t startFrequency = Radio_GetCurrentFreq();
-    uint16_t seekStep = radioState.fmSeekStep ? FM_Step_100k : (FM_Step_100k / 2);
-    
-    while (true) {
-        switch(mode){
-            case 20:
-                Radio_ChangeFreqOneStep(up, seekStep);
-                Radio_SetFreq(Radio_SEARCHMODE, Radio_GetCurrentBand(), Radio_GetCurrentFreq());
-                updateFrequency(FREQ_START_X, FREQ_START_Y, Radio_GetCurrentFreq(), FontGroTeskBig);
-            
-                mode = 30;
-                Radio_CheckStationInit();
-                Radio_ClearCurrentStation();
-                break;
-            
-            case 30:
-                delay(20);
-                Radio_CheckStation();
-                if (Radio_CheckStationStatus() >= NO_STATION) {
-                    mode = 40;
-                }   
-                break;
+static unsigned long seekGetSettleTime(uint8_t band) {
+    return band == 0 ? 20 : 40;
+}
 
-            case 40:
-                if (Radio_CheckStationStatus() == NO_STATION) {        
-                    mode = (startFrequency == Radio_GetCurrentFreq()) ? 50 : 20;
-                }
-                else if (Radio_CheckStationStatus() == PRESENT_STATION) {
-                    mode = 50;
-                }
-                break;
-            
-            case 50:
-                Radio_SetFreq(Radio_PRESETMODE, Radio_GetCurrentBand(), Radio_GetCurrentFreq());
-                return Radio_GetCurrentFreq();
+void seekStart(bool up) {
+    if (seekJob.active) return;
+
+    seekJob.band = radioState.nextBand;
+    seekJob.up = up;
+    seekJob.step = seekGetStep(seekJob.band);
+
+    // MW 频道按 9kHz 间隔排列：搜台前先把频率对齐到 9kHz 栅格
+    if (seekJob.band == MW_BAND && (radioState.amFreq % AM_Step_9k) != 0) {
+        radioState.amFreq -= radioState.amFreq % AM_Step_9k;
+        radio.SetFreqMW(radioState.amFreq);
+    }
+
+    seekJob.startFreq = Radio_GetCurrentFreq();
+    seekJob.phase = 20;
+    seekJob.lastEncoderActivity = millis();
+    seekJob.armed = false;
+    seekJob.active = true;
+
+    encoder.reset();
+
+    noInterrupts();
+    seekStopRequested = false;
+    seekStopByButton = false;
+    interrupts();
+
+    Serial.print("Seek start: band=");
+    Serial.print(topLabels[seekJob.band]);
+    Serial.print(up ? " up" : " down");
+    Serial.print(" freq=");
+    Serial.print(seekJob.startFreq);
+    Serial.print(" step=");
+    Serial.println(seekJob.step);
+}
+
+// 中止搜台：调谐器切到 PRESET 模式，保持当前频率
+void seekStop() {
+    if (!seekJob.active) return;
+
+    uint16_t stopFreq = Radio_GetCurrentFreq();
+    Serial.print("Seek aborted, freq=");
+    Serial.println(stopFreq);
+
+    Radio_SetFreq(Radio_PRESETMODE, seekJob.band, stopFreq);
+
+    switch (seekJob.band) {
+        case 0: radioState.fmFreq = stopFreq; break;
+        case 1: radioState.amFreq = stopFreq; break;
+        default: radioState.swFreq = stopFreq; break;
+    }
+    radioState.freq = stopFreq;
+    radioState.displayNeedsUpdate = true;
+
+    seekJob.active = false;
+    encoder.reset();
+
+    // 用户主动中止：频率停留观察，按手动调台窗口延时保存
+    markPendingSave(STATE_SAVE_DELAY_MANUAL_MS);
+}
+
+void seekTick() {
+    if (!seekJob.active) return;
+
+    switch (seekJob.phase) {
+        case 20:
+            Radio_ChangeFreqOneStep(seekJob.up, seekJob.step);
+            Radio_SetFreq(Radio_SEARCHMODE, seekJob.band, Radio_GetCurrentFreq());
+            updateFrequency(FREQ_START_X, FREQ_START_Y, Radio_GetCurrentFreq(), FontGroTeskBig);
+            Serial.print("Seek step -> ");
+            Serial.println(Radio_GetCurrentFreq());
+
+            Radio_CheckStationInit();
+            Radio_ClearCurrentStation();
+
+            seekJob.phaseTime = millis();
+            seekJob.phase = 30;
+            break;
+
+        case 30:
+            if (millis() - seekJob.phaseTime < seekGetSettleTime(seekJob.band)) break;
+
+            Radio_CheckStation();
+            seekJob.phaseTime = millis();
+
+            if (Radio_CheckStationStatus() >= NO_STATION) {
+                seekJob.phase = 40;
+            }
+            break;
+
+        case 40:
+            if (Radio_CheckStationStatus() == NO_STATION) {
+                seekJob.phase = (seekJob.startFreq == Radio_GetCurrentFreq()) ? 50 : 20;
+            } else if (Radio_CheckStationStatus() == PRESENT_STATION) {
+                seekJob.phase = 50;
+            }
+            break;
+
+        case 50: {
+            Radio_SetFreq(Radio_PRESETMODE, seekJob.band, Radio_GetCurrentFreq());
+
+            uint16_t foundFreq = Radio_GetCurrentFreq();
+            switch (seekJob.band) {
+                case 0: radioState.fmFreq = foundFreq; break;
+                case 1: radioState.amFreq = foundFreq; break;
+                default: radioState.swFreq = foundFreq; break;
+            }
+            radioState.freq = foundFreq;
+            radioState.displayNeedsUpdate = true;
+
+            Serial.print("Seek done, freq=");
+            Serial.println(foundFreq);
+
+            seekJob.active = false;
+            encoder.reset();
+
+            // 搜台落台：稳定满搜台窗口后保存
+            markPendingSave(STATE_SAVE_DELAY_SEEK_MS);
+            break;
         }
     }
-    return 0;
 }
-
-uint16_t MWSeek(uint8_t up) {
-    uint16_t mode = 20;
-    uint16_t startFrequency = Radio_GetCurrentFreq();
-    Serial.print("MWSeek - mwStep: ");
-    Serial.println(radioState.mwStep);
-    Serial.print("Current freq: ");
-    Serial.println(Radio_GetCurrentFreq());
-    while (true) {
-        switch(mode){
-            case 20:
-                Radio_ChangeFreqOneStep(up, 1);
-                Radio_SetFreq(Radio_SEARCHMODE, Radio_GetCurrentBand(), Radio_GetCurrentFreq());
-                updateFrequency(FREQ_START_X, FREQ_START_Y, Radio_GetCurrentFreq(), FontGroTeskBig);
-            
-                mode = 30;
-                Radio_CheckStationInit();
-                Radio_ClearCurrentStation();
-                break;
-            
-            case 30:
-                delay(40);
-                Radio_CheckStation();
-                if (Radio_CheckStationStatus() >= NO_STATION) {
-                    mode = 40;
-                }   
-                break;
-
-            case 40:
-                if (Radio_CheckStationStatus() == NO_STATION) {        
-                    mode = (startFrequency == Radio_GetCurrentFreq()) ? 50 : 20;
-                }
-                else if (Radio_CheckStationStatus() == PRESENT_STATION) {
-                    mode = 50;
-                }
-                break;
-            
-            case 50:
-                Radio_SetFreq(Radio_PRESETMODE, Radio_GetCurrentBand(), Radio_GetCurrentFreq());
-                return Radio_GetCurrentFreq();
-        }
-    }
-    return 0;
-}
-
-uint16_t SWSeek(uint8_t up) {
-    uint16_t mode = 20;
-    uint16_t startFrequency = Radio_GetCurrentFreq();
-
-    while (true) {
-        switch(mode){
-            case 20:
-                Radio_ChangeFreqOneStep(up, 5);
-                Radio_SetFreq(Radio_SEARCHMODE, Radio_GetCurrentBand(), Radio_GetCurrentFreq());
-                updateFrequency(FREQ_START_X, FREQ_START_Y, Radio_GetCurrentFreq(), FontGroTeskBig);
-            
-                mode = 30;
-                Radio_CheckStationInit();
-                Radio_ClearCurrentStation();
-                break;
-            
-            case 30:
-                delay(40);
-                Radio_CheckStation();
-                if (Radio_CheckStationStatus() >= NO_STATION) {
-                    mode = 40;
-                }   
-                break;
-
-            case 40:
-                if (Radio_CheckStationStatus() == NO_STATION) {        
-                    mode = (startFrequency == Radio_GetCurrentFreq()) ? 50 : 20;
-                }
-                else if (Radio_CheckStationStatus() == PRESENT_STATION) {
-                    mode = 50;
-                }
-                break;
-            
-            case 50:
-                Radio_SetFreq(Radio_PRESETMODE, Radio_GetCurrentBand(), Radio_GetCurrentFreq());
-                return Radio_GetCurrentFreq();
-        }
-    }
-    return 0;
-}
-
 // ==================== 主程序 ====================
 
 void setup() {
@@ -931,9 +989,31 @@ void setup() {
 }
 
 void loop() {
-    static unsigned long lastUpdateTime = 0;
     static unsigned long lastSignalUpdateTime = 0;
     unsigned long currentTime = millis();
+
+    // 旋钮静止超过宽限时间后才武装中止检测，跳过启动搜台的同一次旋转
+    if (seekJob.active && !seekJob.armed &&
+        currentTime - seekJob.lastEncoderActivity >= SEEK_ENCODER_GRACE) {
+        seekJob.armed = true;
+    }
+
+    // 搜台中：中断（按键按下沿 / 旋钮转动）请求中止 -> 立即处理
+    if (seekJob.active && seekStopRequested) {
+        bool byButton = seekStopByButton;
+        seekStop();
+        if (byButton) {
+            // 吞掉本次按键：不切换搜索/调谐，也不产生双击/长按
+            buttonState = BUTTON_IDLE;
+            clickActionPending = false;
+            doubleClickActionPending = false;
+            buttonIgnoreUntilRelease = true;
+        }
+    }
+    if (!seekJob.active) {
+        seekStopRequested = false;
+        seekStopByButton = false;
+    }
     
     updateButtonState();
     
@@ -941,55 +1021,19 @@ void loop() {
         processButtonActions();
     }
 
+    seekTick();
     maybeSaveDebounced();   // 调台频率稳定满窗口则落定保存(窗口时长见 STATE_SAVE_DELAY_*_MS)
     
     static int32_t lastCount = 0;
     int32_t currentCount = encoder.getCount();
     
-    if (currentCount != lastCount) {
+    if (!seekJob.active && currentCount != lastCount) {
         if (radioState.seekMode) {
+            // 搜台落台/中止后的保存由 seekTick/seekStop 处理
             if (currentCount > 3) {
-                switch(radioState.nextBand) {
-                    case 0:
-                        radioState.fmFreq = FMSeek(true);
-                        radioState.freq = radioState.fmFreq;
-                        encoder.reset();
-                        radioState.displayNeedsUpdate = true;
-                        break;
-                    case 1:
-                        radioState.amFreq = MWSeek(true);
-                        radioState.freq = radioState.amFreq;
-                        encoder.reset();
-                        radioState.displayNeedsUpdate = true;
-                        break;
-                    case 2:
-                        radioState.swFreq = SWSeek(true);
-                        radioState.freq = radioState.swFreq;
-                        encoder.reset();
-                        radioState.displayNeedsUpdate = true;
-                        break;
-                }
+                seekStart(true);
             } else if (currentCount < -3) {
-                switch(radioState.nextBand) {
-                    case 0:
-                        radioState.fmFreq = FMSeek(false);
-                        radioState.freq = radioState.fmFreq;
-                        encoder.reset();
-                        radioState.displayNeedsUpdate = true;
-                        break;
-                    case 1:
-                        radioState.amFreq = MWSeek(false);
-                        radioState.freq = radioState.amFreq;
-                        encoder.reset();
-                        radioState.displayNeedsUpdate = true;
-                        break;
-                    case 2:
-                        radioState.swFreq = SWSeek(false);
-                        radioState.freq = radioState.swFreq;
-                        encoder.reset();
-                        radioState.displayNeedsUpdate = true;
-                        break;
-                }
+                seekStart(false);
             }
         } else {
             if (currentCount > 3) {
@@ -1049,11 +1093,7 @@ void loop() {
             }
         }
         
-        if (radioState.seekMode) {
-            markPendingSave(STATE_SAVE_DELAY_SEEK_MS);    // 搜台落台 -> 稳定后保存
-        } else {
-            markPendingSave(STATE_SAVE_DELAY_MANUAL_MS);  // 手动调台 -> 稳定后保存
-        }
+        markPendingSave(STATE_SAVE_DELAY_MANUAL_MS);  // 手动调台 -> 稳定后保存
 
         lastCount = currentCount;
     }
