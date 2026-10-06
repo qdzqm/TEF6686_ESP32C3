@@ -1,4 +1,4 @@
-<img width="837" height="625" alt="TEF6686_ESP32C3" src="https://github.com/user-attachments/assets/49c40df3-86ea-4bf5-95fd-ff13d17d7c1f" />
+![TEF6686_ESP32C3 收音机界面（FM / 琥珀复古配色）](docs/radio_ui_FM_amber.png)
 
 # TEF6686_ESP32C3 数字收音机
 
