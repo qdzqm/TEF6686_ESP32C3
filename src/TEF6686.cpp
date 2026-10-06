@@ -53,7 +53,7 @@ uint16_t TEF6686::getFrequency() {
   return Radio_GetCurrentFreq();
 }
 
-uint16_t TEF6686::getLevel(uint8_t band) {
+int16_t TEF6686::getLevel(uint8_t band) {
   return Radio_Get_Level(band);
 }
 

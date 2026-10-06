@@ -18,7 +18,7 @@ class TEF6686 {
     void powerOff();				
     void setFrequency(uint16_t frequency);    // frequency as int, i.e. 100.00 as 10000
     uint16_t getFrequency(); // returns the current frequency
-    uint16_t getLevel(uint8_t band);    // returns the signal level
+    int16_t getLevel(uint8_t band);    // 返回信号电平 dBuV（可能为负）
     uint8_t getStereoStatus();
     void setVolume(int16_t volume); 	// -600 -- +240 (0.1 dB step)
     void setMute();

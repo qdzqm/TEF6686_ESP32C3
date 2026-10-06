@@ -210,7 +210,7 @@ extern uint8_t Radio_CheckStationStatus(void);
 
 void Radio_SetSeekSenLevel(uint8_t Lev);
 uint8_t Radio_CheckStereo(void);
-uint16_t Radio_Get_Level(uint8_t fm);
+int16_t Radio_Get_Level(uint8_t fm);
 uint8_t Radio_Is_AF_Update_Available (void);
 uint8_t Radio_Is_RDAV_Available (void);
 uint16_t Radio_Get_RDS_Data(uint32_t*rds_data);

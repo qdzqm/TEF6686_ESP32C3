@@ -1105,7 +1105,7 @@ void loop() {
     
     if(radioState.nextBand == 0) {
         if (currentTime - lastSignalUpdateTime >= 500) {
-            uint16_t signalLevel = radio.getLevel(1);
+            int16_t signalLevel = radio.getLevel(1);
             bool stereoStatus = radio.getStereoStatus();
             updateSignal(SIGNAL_X, SIGNAL_Y, signalLevel);
             
@@ -1128,7 +1128,7 @@ void loop() {
         }
     } else {
         if (currentTime - lastSignalUpdateTime >= 500) {
-            uint16_t signalLevel = radio.getLevel(0);
+            int16_t signalLevel = radio.getLevel(0);
             updateSignal(SIGNAL_X, SIGNAL_Y, signalLevel);
 
             myTFT.setFont(FontDefault);
