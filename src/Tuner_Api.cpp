@@ -113,7 +113,9 @@ void Radio_SetFreq(uint8_t mode,uint8_t Band,uint16_t Freq)
 				A2Mode = eAR_TuningAction_Check;
 				break;
 		}
-        devTEF668x_Radio_Tune_To(TEF665X_Is_FM_Freq(Freq), (uint16_t)A2Mode, Freq);
+        // 按目标波段选择模块：SW 频率数值(2300~27000kHz)会与 FM 数值区间
+        // (8750~10800, 即87.50~108.00MHz)重叠，不能用频率数值判断 FM/AM。
+        devTEF668x_Radio_Tune_To(Band == FM_BAND, (uint16_t)A2Mode, Freq);
 	}
 }
 /*====================================================
