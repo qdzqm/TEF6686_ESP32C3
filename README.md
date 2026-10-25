@@ -72,7 +72,6 @@
 │   ├── Tuner_Drv_Lithio.cpp/.h      # Lithio 驱动实现
 │   ├── Tuner_Interface.cpp/.h       # I2C 传输层
 │   └── Tuner_Patch_Lithio_*.h       # 收音机固件补丁（p224 / p209 版本）
-└── backup/                  # 历史备份版本
 ```
 
 ## 编译与烧录
